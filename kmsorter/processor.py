@@ -29,8 +29,11 @@ from watchdog.events import FileSystemEventHandler
 
 
 MAX_COLORS = 536870911
-FILE_CACHE_KEY = 'kmsorter/processed-files'
-LOAD_CHANNEL = 'kmsorter/loaded-files'
+IMAGE_CACHE = dict()
+
+
+class MessageDecodeError(Exception):
+    """Signals problems with decoding message to Image."""
 
 
 def image_to_colors(path):
@@ -39,71 +42,17 @@ def image_to_colors(path):
     return colors
 
 
-async def load_img(path, ctx):
-    # TO-DO: don't print, log instead
-    sum = await ctx.obj['redis'].hget(FILE_CACHE_KEY, path)
-    new_sum = hashlib.md5()
-    with open(path, 'rb') as f:
-        while chunk := f.read(8192):
-            new_sum.update(chunk)
-    new_sum = new_sum.hexdigest()
-    if sum == new_sum:
-        if ctx.obj['debug']:
-            print('File %s has been already loaded.' % path)
-        return
-
-    msg = '%s|%s' % (path, ';'.join(['%s,%s' % 
-                                    (','.join([str(i) for i in c[1]]), c[0]) 
-                                    for c in colors]))
-    if ctx.obj['debug']:
-        print('Sending: %s' % msg)
-    await ctx.obj['nats'].publish(LOAD_CHANNEL, msg.encode('utf-8'))
-    await ctx.obj['redis'].hset(FILE_CACHE_KEY, path, new_sum)
+def msg_to_image(msg):
+    pcs = msg.split('|'.encode('utf-8'))
+    if len(pcs) != 5:
+        raise MessageDecodeError('Failed to split message: %s' % msg)
+    for i in range(4):
+        pcs[i] = pcs[i].decode('utf-8')
+    
+    if 
+    img = IMAGE_CACHE.setdefault(hostname)
 
 
-class NewFileHandler(FileSystemEventHandler):
-    def __init__(self, ctx, path):
-        super(self).__init__()
-        self.ctx = ctx
-        self.path = path
 
-    def on_created(self, event):
-        if self.ctx.obj['debug']:
-            click.echo('Loading file %s' % event.src_path)
-        load_img(event.src_path, self.ctx)  
-
-    def on_moved(self, event):
-        if not event.dest_path.startswith(self.path):
-            return
-        if self.ctx.obj['debug']:
-            click.echo('Loading file %s' % event.dest_path)
-        load_img(event.dest_path, self.ctx)
-
-
-async def load_images(ctx, path):
-    if ctx.obj['watch']:
-        if not os.path.isdir():
-            return 1, 'What is the point of watching single file?'
-
-        observer = Observer()
-        observer.schedule(NewFileHandler(ctx, path), path)
-        observer.start()
-
-        if ctx.obj['debug']:
-            click.echo('Watching path %s for new files.' % path)
-
-    if os.path.isdir(path):
-        for pth in os.listdir(path):
-            await load_img(os.path.join(path, pth), ctx)
-    else:
-        await load_img(path, ctx)
-
-    if ctx.obj['watch']:
-        try:
-            while True:
-                time.sleep(1)
-        finally:
-            observer.stop()
-            observer.join()
-
-    return 0, 'Given path wa successfully loaded.'
+async def process_images(ctx):
+   

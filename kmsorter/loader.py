@@ -19,7 +19,10 @@
 #
 
 import hashlib
+import math
 import os
+import socket
+import tempfile
 import time
 
 from PIL import Image
@@ -27,52 +30,113 @@ from PIL import Image
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
+from kmsorter import LOAD_CHANNEL
 
-MAX_COLORS = 536870911
+
 FILE_CHUNK_SIZE = 524288
 FILE_CACHE_KEY = 'kmsorter/processed-files'
-LOAD_CHANNEL = 'kmsorter/loaded-files'
 
 
-def convert_to_rgb(path):
+class DuplicateError(Exception):
+    """Reports duplicated file load"""
+
+
+def convert_to_rgb(path, ctx):
     image = Image.open(path)
     if image.mode != 'RGB':
         image = image.convert('RGB')
-    image.save(path)
+        out_path = os.path.join(ctx.obj['tmpdir'], os.path.basename())
+        image.save(out_path)
+        image.close()
+        return out_path
     image.close()
+    return path
 
 
-def image_chunk_to_message(path, i, chunk):
-    id = '%s|%d|' % (path, i)
+def image_chunk_to_message(id, i, count, chunk):
+    id = '%s|%d|%d|' % (id, i, count)
     msg = bytearray(id.encode('utf-8'))
     msg.extend(chunk)
     return msg
 
 
-async def load_img(path, ctx):
-    convert_to_rgb(path)
+async def deduplicate(host, name, sum, ctx):
+    # id = prefix:hostname
+    # id => [hostname:basename, hostname:basename, ...]
+    # cache[hostname:basename] => sum
+    id = '%s:%s' % (FILE_CACHE_KEY, name)
 
-    sum = await ctx.obj['redis'].hget(FILE_CACHE_KEY, path)
-    new_sum = hashlib.md5()
-    msgs = []
+    img_id = '%s:%s' % (host, name)
+    
+    isthere = await ctx.obj['redis'].exists(id)
+    if isthere:
+        count = await ctx.obj['redis'].llen(id)
+        on_same_host = False
+        for i in range(count):
+            hk = await ctx.obj['redis'].rpop(id)
+            hk = hk.decode('utf-8')
+            host, name = hk.split(':')
+            hsum = await ctx.obj['redis'].hget(FILE_CACHE_KEY, hk)
+            hsum = hsum.decode('utf-8')
+            await ctx.obj['redis'].lpush(id, hk)
+            hkparts = hk.split(':')
+            if sum == hsum:
+                # report duplicate
+                raise DuplicateError('Same image was processed '
+                                     'by agent on host %s' % host)
+            elif hkparts[0] == host:
+                # same host, same name, different sum -> different file
+                on_same_host = True
+        else:
+            if on_same_host:
+                # same host, same name, do name appendix
+                # since there is not actual duplicate
+                parts = name.split('.')
+                if len(parts) == 1:
+                    nm, ext = name, ''
+                else:
+                    nm, ext = '.'.join(parts[:-1]), parts[-1]
+                i = 0
+                isthere = True
+                while isthere:
+                    hk = '%s:%s' % (host, '.'.join(['%s%d' % (nm, i), ext]))
+                    isthere = await ctx.obj['redis'].exists(hk)
+                    i += 1
+                img_id = hk
+
+    # there is not such ocurrence, so create one
+    await ctx.obj['redis'].lpush(id, img_id)
+    await ctx.obj['redis'].hset(FILE_CACHE_KEY, img_id, sum)
+    return img_id
+
+
+async def load_img(path, ctx):
+    path = convert_to_rgb(path, ctx)
+
+    sum = hashlib.md5()
+    chunks = []
     with open(path, 'rb') as f:
         i = 0
         while chunk := f.read(FILE_CHUNK_SIZE):
-            msgs.append(image_chunk_to_message(path, i, chunk))
-            new_sum.update(chunk)
+            chunks.append(chunk)
+            sum.update(chunk)
+    sum = sum.hexdigest()
 
-    new_sum = new_sum.hexdigest()
-    if sum == new_sum:
+    try:
+        img_id = await deduplicate(socket.gethostname(),
+                                   os.path.basename(path),
+                                   sum, ctx)
+    except DuplicateError as ex:
         if ctx.obj['debug']:
-            print('File %s has been already loaded.' % path)
-        return
+            print('File %s has been already loaded: %s' % (path, ex))
+        return        
 
-    for i, m in enumerate(msgs):
+    count = math.ceil(os.stat(path).st_size / FILE_CHUNK_SIZE)
+    for i, c in enumerate(chunks):
         if ctx.obj['debug']:
             print('Sending part #%d of %s' % (i, path))
-        await ctx.obj['nats'].publish(LOAD_CHANNEL, m)
-
-    await ctx.obj['redis'].hset(FILE_CACHE_KEY, path, new_sum)
+        msg = image_chunk_to_message(img_id, i, count, c)
+        await ctx.obj['nats'].publish(LOAD_CHANNEL, msg)
 
 
 class NewFileHandler(FileSystemEventHandler):
@@ -95,6 +159,7 @@ class NewFileHandler(FileSystemEventHandler):
  
 
 async def load_images(ctx, path):
+    ctx.obj['tmpdir'] = tempfile.mkdtemp()
     if ctx.obj['watch']:
         if not os.path.isdir():
             return 1, 'What is the point of watching single file?'
@@ -116,7 +181,7 @@ async def load_images(ctx, path):
         try:
             await load_img(path, ctx)
         except Exception as ex:
-            return 1, 'Failed to load %s. Reason: %s' % (path, ex)
+                return 1, 'Failed to load %s. Reason: %s' % (path, ex)
 
     if ctx.obj['watch']:
         try:
