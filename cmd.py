@@ -27,7 +27,7 @@ import sys
 from functools import wraps
 
 from kmsorter.loader import load_images
-#from .processor import process_img
+from kmsorter.processor import process_images
 #from .sorter import sort_img
 
 
@@ -115,7 +115,8 @@ async def process(ctx):
     """Runs image processor of loaded images."""
     if ctx.obj['debug']:
         click.echo('Starting image processor')
-
+    await process_images(ctx)
+    await disconnect(ctx)
 
 @main.command()
 @click.option('-c', '--color', multiple=True,

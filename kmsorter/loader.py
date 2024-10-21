@@ -21,6 +21,7 @@
 import hashlib
 import math
 import os
+import shutil
 import socket
 import tempfile
 import time
@@ -55,8 +56,9 @@ def convert_to_rgb(path, ctx):
 
 def image_chunk_to_message(id, i, count, chunk):
     id = '%s|%d|%d|' % (id, i, count)
-    msg = bytearray(id.encode('utf-8'))
-    msg.extend(chunk)
+    #msg = bytearray(id.encode('utf-8'))
+    #msg.extend(chunk)
+    msg = id.encode('utf-8') + chunk
     return msg
 
 
@@ -134,7 +136,7 @@ async def load_img(path, ctx):
     count = math.ceil(os.stat(path).st_size / FILE_CHUNK_SIZE)
     for i, c in enumerate(chunks):
         if ctx.obj['debug']:
-            print('Sending part #%d of %s' % (i, path))
+            print('Sending part #%d of %s' % (i, path)) 
         msg = image_chunk_to_message(img_id, i, count, c)
         await ctx.obj['nats'].publish(LOAD_CHANNEL, msg)
 
@@ -177,18 +179,19 @@ async def load_images(ctx, path):
                 await load_img(os.path.join(path, pth), ctx)
             except Exception as ex:
                 click.echo('Failed to load %s. Reason: %s' % (path, ex))
+        
+        if ctx.obj['watch']:
+            try:
+                while True:
+                    time.sleep(1)
+            finally:
+                observer.stop()
+                observer.join()
     else:
         try:
             await load_img(path, ctx)
         except Exception as ex:
-                return 1, 'Failed to load %s. Reason: %s' % (path, ex)
+                click.echo('Failed to load %s. Reason: %s' % (path, ex))
 
-    if ctx.obj['watch']:
-        try:
-            while True:
-                time.sleep(1)
-        finally:
-            observer.stop()
-            observer.join()
-
+    shutil.rmtree(ctx.obj['tmpdir'])
     return 0, 'Given path was successfully loaded.'

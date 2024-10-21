@@ -1,2 +1,2 @@
 
-LOAD_CHANNEL = 'kmsorter/loaded-files'
+LOAD_CHANNEL = 'kmsorter-loaded-files'
