@@ -18,6 +18,7 @@
 #  MA 02110-1301, USA.
 #
 
+import asyncclick as click
 import asyncio
 import hashlib
 import os
@@ -28,7 +29,7 @@ import time
 from PIL import Image
 from numpy import asarray, mean
 
-from kmsorter import LOAD_CHANNEL
+from kmsorter import LOAD_CHANNEL, PROCESS_CHANNEL
 
 MAX_COLORS = 536870911
 IMAGE_CACHE = dict()
@@ -44,35 +45,45 @@ def image_to_colors(path):
     return colors
 
 
-def msg_to_image(msg):
-    pcs = msg.split('|'.encode('utf-8'))
-    if len(pcs) != 5:
-        raise MessageDecodeError('Failed to split message: %s' % msg)
-    for i in range(4):
-        pcs[i] = pcs[i].decode('utf-8')
+def msg_to_data(msg):
+    parts = msg.data.split('|'.encode('utf-8'), 3)
+    id = parts[0].decode('utf-8')
+    num = int(parts[1].decode('utf-8'))
+    count = int(parts[2].decode('utf-8'))
+    data = parts[3]
 
-    img = IMAGE_CACHE.setdefault(hostname)
+    img = IMAGE_CACHE.setdefault(id, dict(count=count, 
+                                          data=[None for i in range(count)]))
+    img['data'][num] = data
 
+    if None in img['data']:
+        return id, None
+
+    img_data = b''
+    for i in img['data']:
+        img_data += i
+    path = os.path.join(ctx.obj['tmpdir'], id)
+    with open(path, 'wb') as img:
+        img.write(data)
+    with Image.open(path) as img:
+        npdata = asarray(img)
+    return id, npdata
 
 
 async def process_images(ctx):
     ctx.obj['tmpdir'] = tempfile.mkdtemp()
 
     async def message_handler(msg):
-        parts = msg.data.split('|'.encode('utf-8'), 3)
-        id = parts[0].decode('utf-8')
-        num = int(parts[1].decode('utf-8'))
-        count = int(parts[2].decode('utf-8'))
-        data = parts[3]
-
-        path = os.path.join(ctx.obj['tmpdir'], id)
-        with open(path, 'wb') as img:
-            img.write(data)
-        with Image.open(path) as img:
-            npdata = asarray(img)
-
+        id, npdata = msg_to_data(msg)
+        if npdata is None:
+            return
         mean_color = mean(npdata, axis=(0, 1))
-   
+        processed = '%d,%d,%d|' % (mean_color)
+        processed = processed.encode('utf-8')
+        processed += msg
+        await ctx.obj['nats'].publish(PROCESS_CHANNEL, msg)
+
+
 
     sub = await ctx.obj['nats'].subscribe(LOAD_CHANNEL, cb=message_handler)
     await ctx.obj['nats'].flush()    

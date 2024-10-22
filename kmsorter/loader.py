@@ -18,6 +18,7 @@
 #  MA 02110-1301, USA.
 #
 
+import asyncclick as click
 import hashlib
 import math
 import os
@@ -56,8 +57,6 @@ def convert_to_rgb(path, ctx):
 
 def image_chunk_to_message(id, i, count, chunk):
     id = '%s|%d|%d|' % (id, i, count)
-    #msg = bytearray(id.encode('utf-8'))
-    #msg.extend(chunk)
     msg = id.encode('utf-8') + chunk
     return msg
 
@@ -130,7 +129,7 @@ async def load_img(path, ctx):
                                    sum, ctx)
     except DuplicateError as ex:
         if ctx.obj['debug']:
-            print('File %s has been already loaded: %s' % (path, ex))
+            click.echo('File %s has been already loaded: %s' % (path, ex))
         return        
 
     count = math.ceil(os.stat(path).st_size / FILE_CHUNK_SIZE)
